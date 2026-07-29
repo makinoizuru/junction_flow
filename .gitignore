@@ -1,0 +1,5 @@
+tmp/
+*.pdf
+node_modules/
+dist/
+.DS_Store
