@@ -6,6 +6,43 @@ function copyControls(controls = {}) {
   };
 }
 
+function rayToBoundary([x, y], [dx, dy], { min, max }) {
+  const candidates = [];
+  if (dx < 0) candidates.push((min - x) / dx);
+  if (dx > 0) candidates.push((max - x) / dx);
+  if (dy < 0) candidates.push((min - y) / dy);
+  if (dy > 0) candidates.push((max - y) / dy);
+  const distance = Math.min(...candidates.filter((value) => value >= 0));
+
+  return Number.isFinite(distance)
+    ? [x + dx * distance, y + dy * distance]
+    : [x, y];
+}
+
+export function extendPathToBounds(
+  path,
+  bounds = { min: 6.5, max: 93.5 },
+) {
+  if (path.length < 2) return path.map((point) => [...point]);
+
+  const start = path[0];
+  const next = path[1];
+  const end = path.at(-1);
+  const previous = path.at(-2);
+  const entry = rayToBoundary(
+    start,
+    [start[0] - next[0], start[1] - next[1]],
+    bounds,
+  );
+  const exit = rayToBoundary(
+    end,
+    [end[0] - previous[0], end[1] - previous[1]],
+    bounds,
+  );
+
+  return [entry, ...path.map((point) => [...point]), exit];
+}
+
 export function createDefaultControls(stage) {
   const phases = stage.controls?.phaseOrder ?? [];
   return {

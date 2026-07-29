@@ -29,6 +29,18 @@ test("every listed phase controls at least one signal", () => {
   }
 });
 
+test("every vehicle has fixed entry and exit portals on the map edge", () => {
+  const onEdge = ([x, y]) =>
+    [x, y].some((value) => value === 6.5 || value === 93.5);
+
+  for (const stage of STAGES) {
+    for (const vehicle of stage.vehicles) {
+      assert.ok(onEdge(vehicle.portals.entry));
+      assert.ok(onEdge(vehicle.portals.exit));
+    }
+  }
+});
+
 test("mixed-turns wrong arrow cannot clear", () => {
   const stage = STAGES.find((item) => item.id === "mixed-turns");
   let state = createSimulation(stage, { ...stage.solution, arrows: { turner: "right" } });

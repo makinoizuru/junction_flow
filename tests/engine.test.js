@@ -3,8 +3,19 @@ import assert from "node:assert/strict";
 import {
   createDefaultControls,
   createSimulation,
+  extendPathToBounds,
   stepSimulation,
 } from "../src/engine.js";
+
+test("route endpoints extend to fixed map boundaries", () => {
+  assert.deepEqual(
+    extendPathToBounds(
+      [[20, 50], [40, 50], [70, 50]],
+      { min: 6.5, max: 93.5 },
+    ),
+    [[6.5, 50], [20, 50], [40, 50], [70, 50], [93.5, 50]],
+  );
+});
 
 test("default phase controls begin with one direction repeated", () => {
   const stage = {

@@ -1,6 +1,7 @@
 import {
   createDefaultControls,
   createSimulation,
+  extendPathToBounds,
   getVehiclePoint,
   isSignalGreen,
   stepSimulation,
@@ -91,8 +92,24 @@ function projectionFor(currentStage) {
   ];
 }
 
-function polylinePoints(path, project) {
-  return path.map((point) => project(point).join(",")).join(" ");
+function projectedRoute(path, project, portals) {
+  const projected = path.map((point) => project(point));
+  return portals
+    ? [[...portals.entry], ...projected, [...portals.exit]]
+    : extendPathToBounds(projected);
+}
+
+function polylinePoints(path, project, portals) {
+  return projectedRoute(path, project, portals)
+    .map((point) => point.join(","))
+    .join(" ");
+}
+
+function markerLabelPoint([x, y]) {
+  if (x <= 6.5) return [x + 5.5, y + 1];
+  if (x >= 93.5) return [x - 5.5, y + 1];
+  if (y <= 6.5) return [x, y + 6];
+  return [x, y - 4.5];
 }
 
 function appendBoardBackdrop() {
@@ -151,29 +168,34 @@ function appendBoardBackdrop() {
 
 function appendRoads(currentStage, project) {
   const seen = new Set();
-  for (const path of allPaths(currentStage)) {
-    const points = polylinePoints(path, project);
-    if (seen.has(points)) continue;
-    seen.add(points);
-    elements.board.append(
-      svgElement("polyline", {
-        points,
-        fill: "none",
-        stroke: "#29312f",
-        "stroke-width": 13,
-        "stroke-linecap": "round",
-        "stroke-linejoin": "round",
-      }),
-      svgElement("polyline", {
-        points,
-        fill: "none",
-        stroke: "#f4d35e",
-        "stroke-width": 0.8,
-        "stroke-dasharray": "3 3",
-        "stroke-linecap": "round",
-        opacity: 0.78,
-      }),
-    );
+  for (const vehicle of currentStage.vehicles) {
+    const paths = vehicle.branches
+      ? Object.values(vehicle.branches)
+      : [vehicle.path];
+    for (const path of paths) {
+      const points = polylinePoints(path, project, vehicle.portals);
+      if (seen.has(points)) continue;
+      seen.add(points);
+      elements.board.append(
+        svgElement("polyline", {
+          points,
+          fill: "none",
+          stroke: "#29312f",
+          "stroke-width": 13,
+          "stroke-linecap": "round",
+          "stroke-linejoin": "round",
+        }),
+        svgElement("polyline", {
+          points,
+          fill: "none",
+          stroke: "#f4d35e",
+          "stroke-width": 0.8,
+          "stroke-dasharray": "3 3",
+          "stroke-linecap": "round",
+          opacity: 0.78,
+        }),
+      );
+    }
   }
 }
 
@@ -182,7 +204,7 @@ function appendSelectedRoutes(currentStage, project) {
     const color = VEHICLE_COLORS[index % VEHICLE_COLORS.length];
     elements.board.append(
       svgElement("polyline", {
-        points: polylinePoints(vehicle.path, project),
+        points: polylinePoints(vehicle.path, project, vehicle.portals),
         fill: "none",
         stroke: color,
         "stroke-width": 1.8,
@@ -196,8 +218,10 @@ function appendSelectedRoutes(currentStage, project) {
 
 function appendEntryAndExitMarkers(project) {
   simulation.vehicles.forEach((vehicle, index) => {
-    const start = project(vehicle.path[0]);
-    const end = project(vehicle.path.at(-1));
+    const route = projectedRoute(vehicle.path, project, vehicle.portals);
+    const start = route[0];
+    const end = route.at(-1);
+    const entryLabel = markerLabelPoint(start);
     const color = VEHICLE_COLORS[index % VEHICLE_COLORS.length];
 
     elements.board.append(
@@ -210,23 +234,31 @@ function appendEntryAndExitMarkers(project) {
         "stroke-width": 0.8,
       }),
       svgElement("text", {
-        x: end[0],
-        y: end[1] - 4.2,
+        x: entryLabel[0],
+        y: entryLabel[1],
         fill: "#17201d",
-        "font-size": 3,
+        "font-size": 2.7,
         "font-weight": 900,
         "text-anchor": "middle",
-      }, "EXIT"),
+      }, "IN"),
       svgElement("rect", {
-        x: end[0] - 3.2,
-        y: end[1] - 2.4,
-        width: 6.4,
-        height: 4.2,
-        rx: 0.5,
+        x: end[0] - 3.8,
+        y: end[1] - 2.3,
+        width: 7.6,
+        height: 4.6,
+        rx: 0.7,
         fill: "#f4d35e",
         stroke: "#17201d",
         "stroke-width": 0.55,
       }),
+      svgElement("text", {
+        x: end[0],
+        y: end[1] + 1.05,
+        fill: "#17201d",
+        "font-size": 2.5,
+        "font-weight": 900,
+        "text-anchor": "middle",
+      }, "EXIT"),
     );
   });
 }
@@ -283,7 +315,14 @@ function vehicleAngle(vehicle) {
 function appendVehicles(project) {
   simulation.vehicles.forEach((vehicle, index) => {
     if (vehicle.exited) return;
-    const [x, y] = project(getVehiclePoint(vehicle));
+    const route = projectedRoute(vehicle.path, project, vehicle.portals);
+    const atStart = vehicle.pathIndex === 0;
+    const atEnd = vehicle.pathIndex === vehicle.path.length - 1;
+    const [x, y] = atStart
+      ? route[0]
+      : atEnd
+        ? route.at(-1)
+        : project(getVehiclePoint(vehicle));
     const group = svgElement("g", {
       class: "vehicle",
       transform: `translate(${x} ${y}) rotate(${vehicleAngle(vehicle)})`,
