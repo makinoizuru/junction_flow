@@ -1,74 +1,173 @@
-// Four compact, deterministic traffic puzzles.
+const STRAIGHT = "straight";
+const HORIZONTAL = "horizontal";
+const VERTICAL = "vertical";
+
+function routes(keys, colors) {
+  return Object.fromEntries(
+    keys.map((key) => [
+      key,
+      Object.fromEntries(colors.map((color) => [color, STRAIGHT])),
+    ]),
+  );
+}
+
 export const STAGES = [
   {
     id: "first-turn",
-    title: "最初の曲がり角",
-    instruction: "各車の矢印分岐を選び、交差点を安全に通過させます。",
-    tip: "互いに進路が重ならない分岐を選びましょう。",
-    vehicles: [
-      { id: "car-a", portals: { entry: [6.5, 38], exit: [38, 6.5] }, branchId: "a-turn", defaultBranch: "straight", branches: { straight: [[0, 1], [1, 1], [2, 1]], turn: [[0, 1], [0, 0], [1, 0]] } },
-      { id: "car-b", portals: { entry: [62, 93.5], exit: [62, 6.5] }, branchId: "b-turn", defaultBranch: "straight", branches: { straight: [[2, 3], [2, 2], [2, 1]], turn: [[2, 3], [3, 3], [3, 2]] } },
+    title: "色別ルート",
+    instruction: "青い矢印を切り替え、青い車を同じ色の出口へ導きます。",
+    tip: "青い車は東から交差点へ入ります。相対的な「左」を考えましょう。",
+    size: 7,
+    grid: [
+      "...#...",
+      "...#...",
+      "...#...",
+      "###+###",
+      "...#...",
+      "...#...",
+      "...#...",
     ],
-    signals: [],
-    controls: { arrows: { "a-turn": ["straight", "turn"], "b-turn": ["straight", "turn"] } },
+    vehicles: [
+      { id: "blue-1", color: "blue", start: [3, 0], direction: "east", exitId: "blue-exit" },
+    ],
+    exits: [
+      { id: "blue-exit", color: "blue", cell: [0, 3] },
+      { id: "red-decoy", color: "red", cell: [3, 6] },
+    ],
+    controls: {
+      routes: routes(["3,3"], ["blue"]),
+      signalCycles: {},
+    },
+    solution: {
+      routes: { "3,3": { blue: "left" } },
+      signalCycles: {},
+    },
     maxTurns: 10,
-    solution: { arrows: { "a-turn": "turn", "b-turn": "straight" } },
   },
   {
-    id: "crossing",
-    title: "交差点",
-    instruction: "南北・東西の信号を順番に青へ切り替えます。",
-    tip: "南北を先に青にすると渋滞を避けられます。",
+    id: "signal-cycle",
+    title: "信号サイクル",
+    instruction: "中央信号の4ターンサイクルを編集し、青と赤を順番に通します。",
+    tip: "2台は同じターンに中央へ到着します。まず左右方向を通しましょう。",
+    size: 7,
+    grid: [
+      "...#...",
+      "...#...",
+      "...#...",
+      "###S###",
+      "...#...",
+      "...#...",
+      "...#...",
+    ],
     vehicles: [
-      { id: "north", portals: { entry: [50, 6.5], exit: [50, 93.5] }, path: [[1, 0], [1, 1], [1, 2], [1, 3]] },
-      { id: "west", portals: { entry: [6.5, 50], exit: [93.5, 50] }, path: [[0, 1], [1, 1], [2, 1]] },
+      { id: "blue-1", color: "blue", start: [3, 0], direction: "east", exitId: "blue-exit" },
+      { id: "red-1", color: "red", start: [0, 3], direction: "south", exitId: "red-exit" },
     ],
-    signals: [
-      { id: "ns", phase: "north-south", vehicleIds: ["north"], stopIndex: 1 },
-      { id: "ew", phase: "east-west", vehicleIds: ["west"], stopIndex: 1 },
+    exits: [
+      { id: "blue-exit", color: "blue", cell: [3, 6] },
+      { id: "red-exit", color: "red", cell: [6, 3] },
     ],
-    controls: { phaseOrder: ["north-south", "east-west"] },
-    phaseDuration: 1,
-    maxTurns: 6,
-    solution: { phaseOrder: ["north-south", "east-west"] },
+    controls: {
+      routes: routes(["3,3"], ["blue", "red"]),
+      signalCycles: {
+        "3,3": [HORIZONTAL, HORIZONTAL, HORIZONTAL, HORIZONTAL],
+      },
+    },
+    solution: {
+      routes: routes(["3,3"], ["blue", "red"]),
+      signalCycles: {
+        "3,3": [HORIZONTAL, VERTICAL, HORIZONTAL, VERTICAL],
+      },
+    },
+    maxTurns: 12,
   },
   {
-    id: "mixed-turns",
-    title: "混合ターン",
-    instruction: "分岐を選び、青信号のフェーズに合わせて進みます。",
-    tip: "曲がる車のフェーズを最初に設定します。",
+    id: "mixed-grid",
+    title: "分岐と信号",
+    instruction: "色別の分岐と中央信号を組み合わせ、2台を別々の出口へ導きます。",
+    tip: "青は上へ、赤は下段から中央へ上がって右へ曲がります。",
+    size: 7,
+    grid: [
+      "...#...",
+      "###+###",
+      "...#...",
+      "###S###",
+      "...#...",
+      "###+###",
+      "...#...",
+    ],
     vehicles: [
-      { id: "turner", portals: { entry: [13, 93.5], exit: [93.5, 50] }, branchId: "turner", defaultBranch: "left", branches: { left: [[0, 2], [0, 1], [1, 1]], right: [[0, 2], [1, 2], [2, 1], [3, 1]] } },
-      { id: "runner", portals: { entry: [75, 6.5], exit: [75, 93.5] }, path: [[3, 0], [3, 1], [3, 2]] },
+      { id: "blue-1", color: "blue", start: [1, 0], direction: "east", exitId: "blue-exit" },
+      { id: "red-1", color: "red", start: [5, 0], direction: "east", exitId: "red-exit" },
     ],
-    signals: [
-      { id: "mix", phase: "turn-phase", vehicleIds: ["turner"], stopIndex: 1 },
-      { id: "run", phase: "run-phase", vehicleIds: ["runner"], stopIndex: 1 },
+    exits: [
+      { id: "blue-exit", color: "blue", cell: [0, 3] },
+      { id: "red-exit", color: "red", cell: [3, 6] },
+      { id: "green-decoy-a", color: "green", cell: [1, 6] },
+      { id: "green-decoy-b", color: "green", cell: [5, 6] },
     ],
-    controls: { arrows: { turner: ["left", "right"] }, phaseOrder: ["turn-phase", "run-phase"] },
-    phaseDuration: 2,
-    maxTurns: 5,
-    solution: { arrows: { turner: "left" }, phaseOrder: ["turn-phase", "run-phase"] },
+    controls: {
+      routes: routes(["1,3", "3,3", "5,3"], ["blue", "red"]),
+      signalCycles: {
+        "3,3": [HORIZONTAL, HORIZONTAL, HORIZONTAL, HORIZONTAL],
+      },
+    },
+    solution: {
+      routes: {
+        "1,3": { blue: "left", red: STRAIGHT },
+        "3,3": { blue: STRAIGHT, red: "right" },
+        "5,3": { blue: STRAIGHT, red: "left" },
+      },
+      signalCycles: {
+        "3,3": [VERTICAL, HORIZONTAL, HORIZONTAL, HORIZONTAL],
+      },
+    },
+    maxTurns: 11,
   },
   {
     id: "rush-hour",
-    title: "ラッシュアワー",
-    instruction: "3つの信号フェーズを正しい順番で処理します。",
-    tip: "3台を一台ずつ順番に通過させましょう。",
+    title: "グリッドラッシュ",
+    instruction: "3色のルートと2基の信号サイクルを調整し、混雑を解消します。",
+    tip: "中央は緑→青→赤の順。下の信号で赤を1ターン待たせます。",
+    size: 7,
+    grid: [
+      "...#...",
+      "###+###",
+      "...#...",
+      "###S###",
+      "...#...",
+      "###S###",
+      "...#...",
+    ],
     vehicles: [
-      { id: "r1", portals: { entry: [6.5, 50], exit: [93.5, 50] }, path: [[0, 2], [1, 2], [2, 2]] },
-      { id: "r2", portals: { entry: [50, 6.5], exit: [50, 93.5] }, path: [[1, 0], [1, 1], [1, 2]] },
-      { id: "r3", portals: { entry: [93.5, 87], exit: [6.5, 50] }, path: [[2, 4], [1, 4], [1, 2], [0, 2]] },
+      { id: "blue-1", color: "blue", start: [1, 0], direction: "east", exitId: "blue-exit" },
+      { id: "red-1", color: "red", start: [5, 0], direction: "east", exitId: "red-exit" },
+      { id: "green-1", color: "green", start: [3, 0], direction: "east", exitId: "green-exit" },
     ],
-    signals: [
-      { id: "p1", phase: "phase-1", vehicleIds: ["r1"], stopIndex: 1 },
-      { id: "p2", phase: "phase-2", vehicleIds: ["r2"], stopIndex: 1 },
-      { id: "p3", phase: "phase-3", vehicleIds: ["r3"], stopIndex: 1 },
+    exits: [
+      { id: "blue-exit", color: "blue", cell: [3, 6] },
+      { id: "red-exit", color: "red", cell: [0, 3] },
+      { id: "green-exit", color: "green", cell: [6, 3] },
     ],
-    controls: { phaseOrder: ["phase-1", "phase-2", "phase-3"] },
-    phaseDuration: 1,
-    maxTurns: 8,
-    solution: { phaseOrder: ["phase-1", "phase-2", "phase-3"] },
+    controls: {
+      routes: routes(["1,3", "3,3", "5,3"], ["blue", "red", "green"]),
+      signalCycles: {
+        "3,3": [HORIZONTAL, HORIZONTAL, HORIZONTAL, HORIZONTAL],
+        "5,3": [HORIZONTAL, HORIZONTAL, HORIZONTAL, HORIZONTAL],
+      },
+    },
+    solution: {
+      routes: {
+        "1,3": { blue: "right", red: STRAIGHT, green: STRAIGHT },
+        "3,3": { blue: "left", red: STRAIGHT, green: "right" },
+        "5,3": { blue: STRAIGHT, red: "left", green: STRAIGHT },
+      },
+      signalCycles: {
+        "3,3": [VERTICAL, VERTICAL, HORIZONTAL, VERTICAL],
+        "5,3": [VERTICAL, HORIZONTAL, VERTICAL, VERTICAL],
+      },
+    },
+    maxTurns: 16,
   },
 ];
 

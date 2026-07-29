@@ -1,28 +1,32 @@
 import {
   createDefaultControls,
   createSimulation,
-  extendPathToBounds,
-  getVehiclePoint,
-  isSignalGreen,
+  signalPhaseAt,
   stepSimulation,
 } from "./engine.js";
 import { STAGES } from "./stages.js";
 
 const SVG_NS = "http://www.w3.org/2000/svg";
-const TICK_MS = 520;
-const VEHICLE_COLORS = ["#ed6a5a", "#4f7cac", "#f4d35e", "#76c9a4", "#9b6dcc"];
-const LABELS = {
-  straight: "直進",
-  turn: "曲がる",
-  left: "左折",
-  right: "右折",
-  "north-south": "南北を青",
-  "east-west": "東西を青",
-  "turn-phase": "右左折を青",
-  "run-phase": "直進を青",
-  "phase-1": "第1方向",
-  "phase-2": "第2方向",
-  "phase-3": "第3方向",
+const CELL = 100;
+const TICK_MS = 430;
+const ROUTE_ORDER = ["straight", "right", "left"];
+const ROUTE_GLYPHS = { straight: "↑", right: "↱", left: "↰" };
+const ROUTE_LABELS = { straight: "直進", right: "右折", left: "左折" };
+const PHASE_GLYPHS = { vertical: "↕", horizontal: "↔" };
+const PHASE_LABELS = { vertical: "上下", horizontal: "左右" };
+const COLOR_HEX = {
+  blue: "#4f7cac",
+  red: "#ee6a5b",
+  green: "#58a878",
+  amber: "#e7ad32",
+  purple: "#8e6bb7",
+};
+const COLOR_LABELS = {
+  blue: "青",
+  red: "赤",
+  green: "緑",
+  amber: "黄",
+  purple: "紫",
 };
 
 const elements = {
@@ -33,7 +37,6 @@ const elements = {
   instruction: document.querySelector("#stage-instruction"),
   tip: document.querySelector("#stage-tip"),
   turn: document.querySelector("#turn-value"),
-  editor: document.querySelector("#control-editor"),
   play: document.querySelector("#play-button"),
   pause: document.querySelector("#pause-button"),
   reset: document.querySelector("#reset-button"),
@@ -50,9 +53,15 @@ let activeStageIndex = 0;
 let controls;
 let simulation;
 let timerId = null;
-const clearedStageIds = new Set(
-  JSON.parse(localStorage.getItem("junction-flow-cleared") ?? "[]"),
-);
+let clearedStageIds = new Set();
+
+try {
+  clearedStageIds = new Set(
+    JSON.parse(localStorage.getItem("junction-flow-grid-cleared") ?? "[]"),
+  );
+} catch {
+  clearedStageIds = new Set();
+}
 
 function stage() {
   return STAGES[activeStageIndex];
@@ -67,291 +76,391 @@ function svgElement(name, attributes = {}, text = "") {
   return node;
 }
 
-function allPaths(currentStage) {
-  return currentStage.vehicles.flatMap((vehicle) =>
-    vehicle.branches
-      ? Object.values(vehicle.branches)
-      : [vehicle.path],
-  );
+function colorFor(color) {
+  return COLOR_HEX[color] ?? "#68736d";
 }
 
-function projectionFor(currentStage) {
-  const points = allPaths(currentStage).flat();
-  const xs = points.map(([x]) => x);
-  const ys = points.map(([, y]) => y);
-  const minX = Math.min(...xs);
-  const maxX = Math.max(...xs);
-  const minY = Math.min(...ys);
-  const maxY = Math.max(...ys);
-  const xRange = Math.max(maxX - minX, 1);
-  const yRange = Math.max(maxY - minY, 1);
-
-  return ([x, y]) => [
-    13 + ((x - minX) / xRange) * 74,
-    13 + ((y - minY) / yRange) * 74,
-  ];
+function cellCenter([row, column]) {
+  return [column * CELL + CELL / 2, row * CELL + CELL / 2];
 }
 
-function projectedRoute(path, project, portals) {
-  const projected = path.map((point) => project(point));
-  return portals
-    ? [[...portals.entry], ...projected, [...portals.exit]]
-    : extendPathToBounds(projected);
+function tileAt(currentStage, row, column) {
+  if (
+    row < 0 ||
+    column < 0 ||
+    row >= currentStage.size ||
+    column >= currentStage.size
+  ) {
+    return ".";
+  }
+  return currentStage.grid[row][column];
 }
 
-function polylinePoints(path, project, portals) {
-  return projectedRoute(path, project, portals)
-    .map((point) => point.join(","))
-    .join(" ");
+function isRoad(currentStage, row, column) {
+  return tileAt(currentStage, row, column) !== ".";
 }
 
-function markerLabelPoint([x, y]) {
-  if (x <= 6.5) return [x + 5.5, y + 1];
-  if (x >= 93.5) return [x - 5.5, y + 1];
-  if (y <= 6.5) return [x, y + 6];
-  return [x, y - 4.5];
-}
-
-function appendBoardBackdrop() {
-  const pattern = svgElement("pattern", {
-    id: "grass-grid",
-    width: 5,
-    height: 5,
-    patternUnits: "userSpaceOnUse",
-  });
-  pattern.append(
-    svgElement("path", {
-      d: "M 5 0 L 0 0 0 5",
-      fill: "none",
-      stroke: "#8fa87b",
-      "stroke-width": 0.35,
-      opacity: 0.55,
-    }),
-  );
-  const defs = svgElement("defs");
-  defs.append(pattern);
+function appendBackdrop(currentStage) {
   elements.board.append(
-    defs,
     svgElement("rect", {
-      width: 100,
-      height: 100,
-      fill: "#a8bc94",
-    }),
-    svgElement("rect", {
-      width: 100,
-      height: 100,
-      fill: "url(#grass-grid)",
+      width: currentStage.size * CELL,
+      height: currentStage.size * CELL,
+      fill: "#afc49c",
     }),
   );
 
-  const blocks = [
-    [5, 5, 15, 10, "#ded7c7"],
-    [77, 6, 17, 12, "#d4ccbb"],
-    [5, 80, 13, 14, "#ded7c7"],
-    [80, 81, 14, 12, "#d4ccbb"],
-  ];
-  for (const [x, y, width, height, fill] of blocks) {
+  for (let index = 0; index <= currentStage.size; index += 1) {
+    const coordinate = index * CELL;
     elements.board.append(
-      svgElement("rect", {
-        x,
-        y,
-        width,
-        height,
-        rx: 1.5,
-        fill,
-        stroke: "#7f897c",
-        "stroke-width": 0.6,
+      svgElement("line", {
+        x1: coordinate,
+        y1: 0,
+        x2: coordinate,
+        y2: currentStage.size * CELL,
+        stroke: "#809878",
+        "stroke-width": 1,
+        opacity: 0.42,
+      }),
+      svgElement("line", {
+        x1: 0,
+        y1: coordinate,
+        x2: currentStage.size * CELL,
+        y2: coordinate,
+        stroke: "#809878",
+        "stroke-width": 1,
+        opacity: 0.42,
       }),
     );
   }
 }
 
-function appendRoads(currentStage, project) {
-  const seen = new Set();
-  for (const vehicle of currentStage.vehicles) {
-    const paths = vehicle.branches
-      ? Object.values(vehicle.branches)
-      : [vehicle.path];
-    for (const path of paths) {
-      const points = polylinePoints(path, project, vehicle.portals);
-      if (seen.has(points)) continue;
-      seen.add(points);
-      elements.board.append(
-        svgElement("polyline", {
-          points,
-          fill: "none",
-          stroke: "#29312f",
-          "stroke-width": 13,
-          "stroke-linecap": "round",
-          "stroke-linejoin": "round",
-        }),
-        svgElement("polyline", {
-          points,
-          fill: "none",
-          stroke: "#f4d35e",
-          "stroke-width": 0.8,
-          "stroke-dasharray": "3 3",
-          "stroke-linecap": "round",
-          opacity: 0.78,
-        }),
-      );
-    }
-  }
-}
+function appendRoads(currentStage) {
+  currentStage.grid.forEach((rowText, row) => {
+    [...rowText].forEach((tile, column) => {
+      if (tile === ".") return;
+      const x = column * CELL;
+      const y = row * CELL;
+      const roadParts = [
+        [x + 28, y + 28, 44, 44],
+        isRoad(currentStage, row - 1, column) && [x + 28, y, 44, 50],
+        isRoad(currentStage, row + 1, column) && [x + 28, y + 50, 44, 50],
+        isRoad(currentStage, row, column - 1) && [x, y + 28, 50, 44],
+        isRoad(currentStage, row, column + 1) && [x + 50, y + 28, 50, 44],
+      ].filter(Boolean);
 
-function appendSelectedRoutes(currentStage, project) {
-  simulation.vehicles.forEach((vehicle, index) => {
-    const color = VEHICLE_COLORS[index % VEHICLE_COLORS.length];
-    elements.board.append(
-      svgElement("polyline", {
-        points: polylinePoints(vehicle.path, project, vehicle.portals),
-        fill: "none",
-        stroke: color,
-        "stroke-width": 1.8,
-        "stroke-dasharray": "1.5 2.5",
-        "stroke-linecap": "round",
-        opacity: 0.72,
-      }),
-    );
+      for (const [partX, partY, width, height] of roadParts) {
+        elements.board.append(
+          svgElement("rect", {
+            x: partX,
+            y: partY,
+            width,
+            height,
+            fill: "#28312f",
+          }),
+        );
+      }
+
+      if (tile === "+" || tile === "S") {
+        elements.board.append(
+          svgElement("rect", {
+            x: x + 23,
+            y: y + 23,
+            width: 54,
+            height: 54,
+            rx: 8,
+            fill: tile === "S" ? "#1f2926" : "#35413e",
+            stroke: tile === "S" ? "#f2cf4a" : "#d9dfda",
+            "stroke-width": tile === "S" ? 5 : 2,
+          }),
+        );
+      }
+    });
+  });
+
+  currentStage.grid.forEach((rowText, row) => {
+    [...rowText].forEach((tile, column) => {
+      if (tile === ".") return;
+      const [x, y] = cellCenter([row, column]);
+      if (isRoad(currentStage, row, column + 1)) {
+        elements.board.append(
+          svgElement("line", {
+            x1: x,
+            y1: y,
+            x2: x + CELL,
+            y2: y,
+            stroke: "#f2cf4a",
+            "stroke-width": 3,
+            "stroke-dasharray": "13 13",
+            opacity: 0.72,
+          }),
+        );
+      }
+      if (isRoad(currentStage, row + 1, column)) {
+        elements.board.append(
+          svgElement("line", {
+            x1: x,
+            y1: y,
+            x2: x,
+            y2: y + CELL,
+            stroke: "#f2cf4a",
+            "stroke-width": 3,
+            "stroke-dasharray": "13 13",
+            opacity: 0.72,
+          }),
+        );
+      }
+    });
   });
 }
 
-function appendEntryAndExitMarkers(project) {
-  simulation.vehicles.forEach((vehicle, index) => {
-    const route = projectedRoute(vehicle.path, project, vehicle.portals);
-    const start = route[0];
-    const end = route.at(-1);
-    const entryLabel = markerLabelPoint(start);
-    const color = VEHICLE_COLORS[index % VEHICLE_COLORS.length];
+function boundaryRotation([row, column], size) {
+  if (row === 0) return 0;
+  if (column === size - 1) return 90;
+  if (row === size - 1) return 180;
+  return 270;
+}
 
-    elements.board.append(
-      svgElement("circle", {
-        cx: start[0],
-        cy: start[1],
-        r: 3.2,
-        fill: color,
-        stroke: "#17201d",
-        "stroke-width": 0.8,
-      }),
-      svgElement("text", {
-        x: entryLabel[0],
-        y: entryLabel[1],
-        fill: "#17201d",
-        "font-size": 2.7,
-        "font-weight": 900,
-        "text-anchor": "middle",
-      }, "IN"),
+function appendPortals(currentStage) {
+  for (const exit of currentStage.exits) {
+    const [x, y] = cellCenter(exit.cell);
+    const group = svgElement("g", {
+      transform: `translate(${x} ${y}) rotate(${boundaryRotation(exit.cell, currentStage.size)})`,
+    });
+    group.append(
       svgElement("rect", {
-        x: end[0] - 3.8,
-        y: end[1] - 2.3,
-        width: 7.6,
-        height: 4.6,
-        rx: 0.7,
-        fill: "#f4d35e",
+        x: -29,
+        y: -20,
+        width: 58,
+        height: 40,
+        rx: 8,
+        fill: colorFor(exit.color),
         stroke: "#17201d",
-        "stroke-width": 0.55,
+        "stroke-width": 5,
       }),
       svgElement("text", {
-        x: end[0],
-        y: end[1] + 1.05,
-        fill: "#17201d",
-        "font-size": 2.5,
-        "font-weight": 900,
+        x: 0,
+        y: 5,
+        fill: "#fff",
+        "font-size": 14,
+        "font-weight": 1000,
         "text-anchor": "middle",
       }, "EXIT"),
     );
+    elements.board.append(group);
+  }
+
+  for (const vehicle of currentStage.vehicles) {
+    const [x, y] = cellCenter(vehicle.start);
+    elements.board.append(
+      svgElement("text", {
+        x,
+        y: y + 34,
+        fill: "#fff",
+        "font-size": 12,
+        "font-weight": 1000,
+        "text-anchor": "middle",
+        stroke: "#17201d",
+        "stroke-width": 4,
+        "paint-order": "stroke",
+      }, "IN"),
+    );
+  }
+}
+
+function activateControl(group, handler, label) {
+  const editable = simulation.turn === 0 && timerId === null;
+  group.setAttribute("role", "button");
+  group.setAttribute("aria-label", label);
+  group.setAttribute("aria-disabled", String(!editable));
+  group.setAttribute("tabindex", editable ? "0" : "-1");
+  group.classList.toggle("is-locked", !editable);
+  if (!editable) return;
+
+  group.addEventListener("click", handler);
+  group.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      handler();
+    }
   });
 }
 
-function appendSignals(currentStage, project) {
-  currentStage.signals.forEach((signal, index) => {
-    const vehicle = simulation.vehicles.find(({ id }) =>
-      signal.vehicleIds.includes(id),
-    );
-    if (!vehicle) return;
-    const point = project(
-      vehicle.path[Math.min(signal.stopIndex, vehicle.path.length - 1)],
-    );
-    const green = isSignalGreen(signal, simulation);
-    const xOffset = index % 2 === 0 ? -5 : 3;
+function rebuildReadySimulation(focusKey = null) {
+  stopTimer();
+  simulation = createSimulation(stage(), controls);
+  hideResult();
+  render();
+  if (focusKey) {
+    elements.board
+      .querySelector(`[data-control-key="${focusKey}"]`)
+      ?.focus();
+  }
+}
+
+function appendRouteControls(currentStage) {
+  const colors = [...new Set(currentStage.vehicles.map(({ color }) => color))];
+  currentStage.grid.forEach((rowText, row) => {
+    [...rowText].forEach((tile, column) => {
+      if (tile !== "+" && tile !== "S") return;
+      const key = `${row},${column}`;
+      const totalWidth = colors.length * 25;
+      const startX = column * CELL + (CELL - totalWidth) / 2 + 12.5;
+      const y = row * CELL + 14;
+
+      colors.forEach((color, index) => {
+        const route = controls.routes[key]?.[color] ?? "straight";
+        const group = svgElement("g", {
+          class: "route-control",
+          transform: `translate(${startX + index * 25} ${y})`,
+          "data-control-key": `route-${key}-${color}`,
+        });
+        group.append(
+          svgElement("circle", {
+            class: "control-touch-target",
+            cx: 0,
+            cy: 0,
+            r: 20,
+            fill: "transparent",
+          }),
+          svgElement("circle", {
+            class: "control-hit",
+            cx: 0,
+            cy: 0,
+            r: 13,
+            fill: colorFor(color),
+            stroke: "#17201d",
+            "stroke-width": 3,
+          }),
+          svgElement("text", {
+            x: 0,
+            y: 5,
+            fill: "#fff",
+            "font-size": 15,
+            "font-weight": 1000,
+            "text-anchor": "middle",
+            "pointer-events": "none",
+          }, ROUTE_GLYPHS[route]),
+          svgElement(
+            "title",
+            {},
+            `${COLOR_LABELS[color] ?? color}：${ROUTE_LABELS[route]}`,
+          ),
+        );
+        activateControl(
+          group,
+          () => {
+            const nextIndex =
+              (ROUTE_ORDER.indexOf(route) + 1) % ROUTE_ORDER.length;
+            controls.routes[key][color] = ROUTE_ORDER[nextIndex];
+            rebuildReadySimulation(`route-${key}-${color}`);
+          },
+          `${COLOR_LABELS[color] ?? color}の進路：${ROUTE_LABELS[route]}。クリックで切り替え`,
+        );
+        elements.board.append(group);
+      });
+    });
+  });
+}
+
+function appendSignalControls(currentStage) {
+  currentStage.grid.forEach((rowText, row) => {
+    [...rowText].forEach((tile, column) => {
+      if (tile !== "S") return;
+      const key = `${row},${column}`;
+      const cycle = controls.signalCycles[key];
+      const startX = column * CELL + 14;
+      const y = row * CELL + 77;
+
+      cycle.forEach((phase, index) => {
+        const active = simulation.turn % cycle.length === index;
+        const group = svgElement("g", {
+          class: "signal-slot",
+          transform: `translate(${startX + index * 19} ${y})`,
+          "data-control-key": `signal-${key}-${index}`,
+        });
+        group.append(
+          svgElement("rect", {
+            class: "control-touch-target",
+            x: -2,
+            y: -4,
+            width: 21,
+            height: 25,
+            rx: 6,
+            fill: "transparent",
+          }),
+          svgElement("rect", {
+            class: "control-hit",
+            x: 0,
+            y: 0,
+            width: 17,
+            height: 17,
+            rx: 4,
+            fill: phase === "vertical" ? "#72c5a5" : "#f2cf4a",
+            stroke: active ? "#fff" : "#17201d",
+            "stroke-width": active ? 4 : 2,
+          }),
+          svgElement("text", {
+            x: 8.5,
+            y: 12.5,
+            fill: "#17201d",
+            "font-size": 11,
+            "font-weight": 1000,
+            "text-anchor": "middle",
+            "pointer-events": "none",
+          }, PHASE_GLYPHS[phase]),
+          svgElement(
+            "title",
+            {},
+            `${index + 1}ターン目：${PHASE_LABELS[phase]}`,
+          ),
+        );
+        activateControl(
+          group,
+          () => {
+            cycle[index] =
+              phase === "vertical" ? "horizontal" : "vertical";
+            rebuildReadySimulation(`signal-${key}-${index}`);
+          },
+          `信号サイクル${index + 1}：${PHASE_LABELS[phase]}。クリックで切り替え`,
+        );
+        elements.board.append(group);
+      });
+    });
+  });
+}
+
+function vehicleAngle(direction) {
+  return { north: -90, east: 0, south: 90, west: 180 }[direction] ?? 0;
+}
+
+function appendVehicles() {
+  simulation.vehicles.forEach((vehicle) => {
+    if (vehicle.exited) return;
+    const [x, y] = cellCenter(vehicle.cell);
     const group = svgElement("g", {
-      transform: `translate(${point[0] + xOffset} ${point[1] - 5})`,
+      transform: `translate(${x} ${y}) rotate(${vehicleAngle(vehicle.direction)})`,
     });
     group.append(
+      svgElement("rect", {
+        x: -24,
+        y: -14,
+        width: 48,
+        height: 28,
+        rx: 8,
+        fill: colorFor(vehicle.color),
+        stroke: "#17201d",
+        "stroke-width": 5,
+      }),
       svgElement("rect", {
         x: 0,
-        y: 0,
-        width: 4.6,
-        height: 8.5,
-        rx: 1.3,
-        fill: "#17201d",
-        stroke: "#fffdf7",
-        "stroke-width": 0.55,
-      }),
-      svgElement("circle", {
-        cx: 2.3,
-        cy: 2.4,
-        r: 1.2,
-        fill: green ? "#614944" : "#ed6a5a",
-      }),
-      svgElement("circle", {
-        cx: 2.3,
-        cy: 6.1,
-        r: 1.2,
-        fill: green ? "#76c9a4" : "#43514c",
-      }),
-    );
-    elements.board.append(group);
-  });
-}
-
-function vehicleAngle(vehicle) {
-  const index = Math.min(vehicle.pathIndex, vehicle.path.length - 1);
-  const from = vehicle.path[Math.max(0, index - 1)];
-  const to = vehicle.path[Math.min(vehicle.path.length - 1, index + 1)];
-  return Math.atan2(to[1] - from[1], to[0] - from[0]) * (180 / Math.PI);
-}
-
-function appendVehicles(project) {
-  simulation.vehicles.forEach((vehicle, index) => {
-    if (vehicle.exited) return;
-    const route = projectedRoute(vehicle.path, project, vehicle.portals);
-    const atStart = vehicle.pathIndex === 0;
-    const atEnd = vehicle.pathIndex === vehicle.path.length - 1;
-    const [x, y] = atStart
-      ? route[0]
-      : atEnd
-        ? route.at(-1)
-        : project(getVehiclePoint(vehicle));
-    const group = svgElement("g", {
-      class: "vehicle",
-      transform: `translate(${x} ${y}) rotate(${vehicleAngle(vehicle)})`,
-    });
-    group.append(
-      svgElement("rect", {
-        x: -3.5,
-        y: -2.2,
-        width: 7,
-        height: 4.4,
-        rx: 1.2,
-        fill: VEHICLE_COLORS[index % VEHICLE_COLORS.length],
-        stroke: "#17201d",
-        "stroke-width": 0.8,
-      }),
-      svgElement("rect", {
-        x: -0.8,
-        y: -1.6,
-        width: 2.3,
-        height: 3.2,
-        rx: 0.4,
+        y: -10,
+        width: 15,
+        height: 20,
+        rx: 3,
         fill: "#d9edf0",
         stroke: "#17201d",
-        "stroke-width": 0.35,
+        "stroke-width": 2,
       }),
-      svgElement("circle", { cx: -2.1, cy: -2.3, r: 0.55, fill: "#17201d" }),
-      svgElement("circle", { cx: 2.1, cy: -2.3, r: 0.55, fill: "#17201d" }),
-      svgElement("circle", { cx: -2.1, cy: 2.3, r: 0.55, fill: "#17201d" }),
-      svgElement("circle", { cx: 2.1, cy: 2.3, r: 0.55, fill: "#17201d" }),
     );
     elements.board.append(group);
   });
@@ -359,182 +468,87 @@ function appendVehicles(project) {
 
 function renderBoard() {
   const currentStage = stage();
-  const project = projectionFor(currentStage);
-  elements.board.replaceChildren();
-  elements.board.append(
+  elements.board.replaceChildren(
     svgElement(
       "title",
       { id: "board-title" },
-      `${currentStage.title}の交通パズル`,
+      `${currentStage.title}のグリッド交通パズル`,
     ),
     svgElement(
       "desc",
       { id: "board-description" },
-      "信号と矢印を設定し、すべての車を安全に出口へ導きます。",
+      "色付き矢印と信号サイクルを直接クリックし、車を同じ色の出口へ導きます。",
     ),
   );
-  appendBoardBackdrop();
-  appendRoads(currentStage, project);
-  appendSelectedRoutes(currentStage, project);
-  appendEntryAndExitMarkers(project);
-  appendSignals(currentStage, project);
-  appendVehicles(project);
+  appendBackdrop(currentStage);
+  appendRoads(currentStage);
+  appendPortals(currentStage);
+  appendRouteControls(currentStage);
+  appendSignalControls(currentStage);
+  appendVehicles();
 }
 
 function renderStageList() {
   elements.stageList.replaceChildren();
   STAGES.forEach((item, index) => {
     const button = document.createElement("button");
-    button.type = "button";
-    button.className = `stage-button${clearedStageIds.has(item.id) ? " is-cleared" : ""}`;
-    button.setAttribute("aria-current", String(index === activeStageIndex));
     const cleared = clearedStageIds.has(item.id);
-    button.innerHTML = `
-      <span class="stage-number">${String(index + 1).padStart(2, "0")}</span>
-      <span class="stage-name">${item.title}</span>
-      <span class="stage-check"${cleared ? ' aria-label="クリア済み"' : ' aria-hidden="true"'}>✓</span>
-    `;
+    button.type = "button";
+    button.className = `stage-button${cleared ? " is-cleared" : ""}`;
+    button.setAttribute("aria-current", String(index === activeStageIndex));
+
+    const number = document.createElement("span");
+    number.className = "stage-number";
+    number.textContent = String(index + 1).padStart(2, "0");
+    const name = document.createElement("span");
+    name.className = "stage-name";
+    name.textContent = item.title;
+    const check = document.createElement("span");
+    check.className = "stage-check";
+    check.textContent = "✓";
+    check.setAttribute(cleared ? "aria-label" : "aria-hidden", cleared ? "クリア済み" : "true");
+    button.append(number, name, check);
     button.addEventListener("click", () => loadStage(index));
     elements.stageList.append(button);
   });
 }
 
-function makeSelect(controlId, label, hint, values, selected, onChange) {
-  const group = document.createElement("div");
-  group.className = "control-group";
-  const labelElement = document.createElement("label");
-  labelElement.className = "control-label";
-  labelElement.htmlFor = controlId;
-  labelElement.textContent = label;
-  const hintElement = document.createElement("span");
-  hintElement.className = "control-hint";
-  hintElement.textContent = hint;
-  labelElement.append(hintElement);
-
-  const select = document.createElement("select");
-  select.id = controlId;
-  select.className = "control-select";
-  select.disabled = simulation.turn > 0;
-  values.forEach((value) => {
-    const option = document.createElement("option");
-    option.value = value;
-    option.textContent = LABELS[value] ?? value;
-    option.selected = value === selected;
-    select.append(option);
-  });
-  select.addEventListener("change", () => onChange(select.value));
-  group.append(labelElement, select);
-  return group;
-}
-
-function rebuildReadySimulation() {
-  stopTimer();
-  simulation = createSimulation(stage(), controls);
-  hideResult();
-  render();
-}
-
-function renderControls() {
-  elements.editor.replaceChildren();
-  const arrowEntries = Object.entries(stage().controls.arrows ?? {});
-  arrowEntries.forEach(([id, options], index) => {
-    elements.editor.append(
-      makeSelect(
-        `control-${stage().id}-arrow-${id}`,
-        `車両 ${String.fromCharCode(65 + index)} の進路`,
-        "交差点で進む向き",
-        options,
-        controls.arrows[id],
-        (value) => {
-          controls.arrows[id] = value;
-          rebuildReadySimulation();
-        },
-      ),
-    );
-  });
-
-  const phases = stage().controls.phaseOrder ?? [];
-  phases.forEach((_, index) => {
-    elements.editor.append(
-      makeSelect(
-        `control-${stage().id}-phase-${index}`,
-        `信号フェーズ ${index + 1}`,
-        `${index + 1}番目に青にする方向`,
-        phases,
-        controls.phaseOrder[index],
-        (value) => {
-          controls.phaseOrder[index] = value;
-          rebuildReadySimulation();
-        },
-      ),
-    );
-  });
-
-  if (!arrowEntries.length && !phases.length) {
-    const empty = document.createElement("p");
-    empty.className = "control-intro";
-    empty.textContent = "このステージに変更できる設定はありません。";
-    elements.editor.append(empty);
-  }
-}
-
 function statusText() {
-  if (simulation.status === "ready") return "設定を選んで、車を流してみよう。";
-  if (simulation.status === "running" && timerId === null) return "一時停止中。再生すると続きから動きます。";
-  if (simulation.status === "running") return "シミュレーション中…車の流れを観察しよう。";
-  if (simulation.status === "crashed") return "衝突発生。進路や信号の順番を見直そう。";
-  if (simulation.status === "jammed") return "時間切れ。もっと短い流れを探してみよう。";
-  return `クリア！ ${simulation.turn}ターンですべての車が通過しました。`;
+  if (simulation.status === "ready") {
+    return "交差点の色付き矢印と信号スロットを直接クリックしてください。";
+  }
+  if (simulation.status === "running" && timerId === null) {
+    return "一時停止中です。「流してみる」で再開します。";
+  }
+  if (simulation.status === "running") {
+    return "シミュレーション中…信号サイクルは4ターンごとに繰り返します。";
+  }
+  if (simulation.status === "cleared") {
+    return `クリア！ ${simulation.turn}ターンで全車が出口へ到着しました。`;
+  }
+  const reasons = {
+    collision: "車同士が衝突しました。",
+    "wrong-exit": "違う色の出口へ入ってしまいました。",
+    derailed: "道路から外れ、出口へ到達できませんでした。",
+    "time-over": "制限ターン内に出口へ到達できませんでした。",
+  };
+  return reasons[simulation.reason] ?? "ルートが成立しませんでした。";
 }
 
 function render() {
+  const currentStage = stage();
+  elements.stageKicker.textContent =
+    `STAGE ${String(activeStageIndex + 1).padStart(2, "0")}`;
+  elements.stageTitle.textContent = currentStage.title;
+  elements.instruction.textContent = currentStage.instruction;
+  elements.tip.textContent = currentStage.tip;
   elements.turn.textContent = String(simulation.turn).padStart(2, "0");
   elements.status.textContent = statusText();
   elements.play.disabled =
-    timerId !== null ||
-    ["cleared", "crashed", "jammed"].includes(simulation.status);
+    timerId !== null || !["ready", "running"].includes(simulation.status);
   elements.pause.disabled = timerId === null;
+  renderStageList();
   renderBoard();
-  renderControls();
-}
-
-function showResult() {
-  const cleared = simulation.status === "cleared";
-  elements.overlay.hidden = false;
-  elements.resultIcon.textContent = cleared ? "✓" : "!";
-  elements.resultIcon.style.background = cleared ? "#76c9a4" : "#ed6a5a";
-  elements.resultLabel.textContent = cleared
-    ? "JUNCTION CLEAR"
-    : simulation.status === "crashed"
-      ? "COLLISION"
-      : "TIME OVER";
-  elements.resultTitle.textContent = cleared
-    ? "交差点、開通！"
-    : simulation.status === "crashed"
-      ? "ぶつかってしまった"
-      : "流れが止まった";
-  elements.resultDetail.textContent = cleared
-    ? `${simulation.turn}ターンですべての車が出口へ到達しました。`
-    : "設定を少し変えて、もう一度試してみましょう。";
-  elements.next.textContent =
-    cleared && activeStageIndex < STAGES.length - 1
-      ? "次のステージ"
-      : cleared
-        ? "最初から遊ぶ"
-        : "設定に戻る";
-
-  if (cleared) {
-    clearedStageIds.add(stage().id);
-    localStorage.setItem(
-      "junction-flow-cleared",
-      JSON.stringify([...clearedStageIds]),
-    );
-    renderStageList();
-  }
-}
-
-function hideResult() {
-  elements.overlay.hidden = true;
 }
 
 function stopTimer() {
@@ -544,28 +558,61 @@ function stopTimer() {
   }
 }
 
-function tick() {
+function hideResult() {
+  elements.overlay.hidden = true;
+}
+
+function showResult() {
+  const cleared = simulation.status === "cleared";
+  elements.overlay.hidden = false;
+  elements.resultIcon.textContent = cleared ? "✓" : "!";
+  elements.resultIcon.style.background = cleared ? "#72c5a5" : "#ee6a5b";
+  elements.resultLabel.textContent = cleared ? "GRID CLEAR" : "GAME OVER";
+  elements.resultTitle.textContent = cleared
+    ? "全車、到着！"
+    : simulation.reason === "collision"
+      ? "交差点で衝突"
+      : "出口へ届かなかった";
+  elements.resultDetail.textContent = cleared
+    ? `${simulation.turn}ターンで、すべての車が同じ色の出口へ到着しました。`
+    : statusText();
+  elements.next.textContent = cleared
+    ? activeStageIndex < STAGES.length - 1
+      ? "次のステージ"
+      : "最初から遊ぶ"
+    : "設定に戻る";
+
+  if (cleared) {
+    clearedStageIds.add(stage().id);
+    localStorage.setItem(
+      "junction-flow-grid-cleared",
+      JSON.stringify([...clearedStageIds]),
+    );
+    renderStageList();
+  }
+}
+
+function advance() {
   simulation = stepSimulation(simulation);
-  render();
-  if (["cleared", "crashed", "jammed"].includes(simulation.status)) {
+  if (!["ready", "running"].includes(simulation.status)) {
     stopTimer();
     render();
     showResult();
+    return;
   }
+  render();
 }
 
 function play() {
-  if (timerId !== null) return;
-  tick();
+  if (!["ready", "running"].includes(simulation.status) || timerId !== null) {
+    return;
+  }
+  hideResult();
+  advance();
   if (simulation.status === "running") {
-    timerId = window.setInterval(tick, TICK_MS);
+    timerId = window.setInterval(advance, TICK_MS);
     render();
   }
-}
-
-function pause() {
-  stopTimer();
-  render();
 }
 
 function reset() {
@@ -576,21 +623,16 @@ function reset() {
 }
 
 function loadStage(index) {
-  stopTimer();
-  activeStageIndex = (index + STAGES.length) % STAGES.length;
+  activeStageIndex = index;
   controls = createDefaultControls(stage());
-  simulation = createSimulation(stage(), controls);
-  elements.stageKicker.textContent = `STAGE ${String(activeStageIndex + 1).padStart(2, "0")}`;
-  elements.stageTitle.textContent = stage().title;
-  elements.instruction.textContent = stage().instruction;
-  elements.tip.textContent = stage().tip;
-  hideResult();
-  renderStageList();
-  render();
+  reset();
 }
 
 elements.play.addEventListener("click", play);
-elements.pause.addEventListener("click", pause);
+elements.pause.addEventListener("click", () => {
+  stopTimer();
+  render();
+});
 elements.reset.addEventListener("click", reset);
 elements.next.addEventListener("click", () => {
   if (simulation.status === "cleared") {

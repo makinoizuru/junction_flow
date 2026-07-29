@@ -1,42 +1,36 @@
 <!doctype html>
 <html lang="ja">
   <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta
       name="description"
-      content="矢印と信号を組み替えて、交差点の車を安全に流す交通パズルゲーム"
-    >
-    <title>Junction Flow — 交通整理パズル</title>
-    <link rel="stylesheet" href="./styles.css">
+      content="交差点の色別ルートと信号サイクルを直接操作するグリッド交通パズル"
+    />
+    <title>Junction Flow — グリッド交通パズル</title>
+    <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
     <header class="site-header">
       <a class="brand" href="#" aria-label="Junction Flow ホーム">
-        <span class="brand-mark" aria-hidden="true">
-          <i></i><i></i><i></i>
-        </span>
-        <span>
-          <strong>JUNCTION</strong>
-          <small>FLOW</small>
-        </span>
+        <span class="brand-mark" aria-hidden="true">•••</span>
+        <span><strong>JUNCTION</strong><small>FLOW</small></span>
       </a>
-      <p class="header-note">
-        <span class="live-dot" aria-hidden="true"></span>
-        交通整理パズル
-      </p>
+      <p><span class="status-dot"></span> グリッド交通パズル</p>
     </header>
 
     <main class="game-shell">
       <aside class="stage-panel" aria-labelledby="stage-heading">
         <div class="eyebrow">STAGE SELECT</div>
-        <h2 id="stage-heading">交差点を選ぶ</h2>
+        <h2 id="stage-heading">マップを選ぶ</h2>
         <nav id="stage-list" class="stage-list" aria-label="ステージ一覧"></nav>
+
         <div class="legend">
-          <h3>道路の見かた</h3>
-          <p><span class="legend-car coral"></span> 車両</p>
-          <p><span class="legend-signal"></span> 信号</p>
-          <p><span class="legend-exit">EXIT</span> 出口</p>
+          <h3>盤面を直接クリック</h3>
+          <p><span class="legend-route">↱</span> 色付き矢印：進行方向</p>
+          <p><span class="legend-phase">↕</span> 信号スロット：上下</p>
+          <p><span class="legend-phase">↔</span> 信号スロット：左右</p>
+          <p><span class="legend-exit">EXIT</span> 同じ色の出口がゴール</p>
         </div>
       </aside>
 
@@ -44,7 +38,7 @@
         <div class="stage-heading-row">
           <div>
             <div id="stage-kicker" class="eyebrow">STAGE 01</div>
-            <h1 id="stage-title">はじめの分岐</h1>
+            <h1 id="stage-title">グリッド交差点</h1>
           </div>
           <div class="turn-counter" aria-live="polite">
             <span>TURN</span>
@@ -57,20 +51,16 @@
         <div id="board-frame" class="board-frame">
           <svg
             id="game-board"
-            viewBox="0 0 100 100"
+            viewBox="0 0 700 700"
             role="img"
             aria-labelledby="board-title board-description"
-          >
-            <title id="board-title">交通パズルの交差点</title>
-            <desc id="board-description">
-              信号と矢印を設定し、すべての車を安全に出口へ導きます。
-            </desc>
-          </svg>
+          ></svg>
+
           <div id="result-overlay" class="result-overlay" hidden>
             <div class="result-card">
-              <span id="result-icon" class="result-icon">✓</span>
-              <p id="result-label">CLEAR</p>
-              <h2 id="result-title">交差点、開通！</h2>
+              <div id="result-icon" class="result-icon">✓</div>
+              <div id="result-label" class="eyebrow">GRID CLEAR</div>
+              <h2 id="result-title">全車、到着！</h2>
               <p id="result-detail"></p>
               <button id="next-button" class="primary-button" type="button">
                 次のステージ
@@ -79,38 +69,30 @@
           </div>
         </div>
 
-        <div class="transport" aria-label="シミュレーション操作">
-          <button id="play-button" class="primary-button" type="button">
-            <span aria-hidden="true">▶</span> 流してみる
-          </button>
-          <button id="pause-button" class="secondary-button" type="button">
-            <span aria-hidden="true">Ⅱ</span> 一時停止
-          </button>
-          <button id="reset-button" class="secondary-button" type="button">
-            <span aria-hidden="true">↻</span> やり直す
-          </button>
-          <div id="status-message" class="status-message" role="status">
-            設定を選んで、車を流してみよう。
+        <div class="board-toolbar">
+          <div class="playback-controls" aria-label="シミュレーション操作">
+            <button id="play-button" class="primary-button" type="button">
+              ▶ 流してみる
+            </button>
+            <button id="pause-button" class="secondary-button" type="button" disabled>
+              Ⅱ 一時停止
+            </button>
+            <button id="reset-button" class="secondary-button" type="button">
+              ↻ やり直す
+            </button>
           </div>
+          <p id="status-message" class="status-message" aria-live="polite"></p>
+        </div>
+
+        <div class="stage-tip">
+          <span>TIP</span>
+          <p id="stage-tip"></p>
         </div>
       </section>
-
-      <aside class="control-panel" aria-labelledby="control-heading">
-        <div class="eyebrow">FLOW CONTROL</div>
-        <h2 id="control-heading">交通ルール</h2>
-        <p class="control-intro">
-          選択肢を組み替えて、渋滞や衝突を防ぎましょう。
-        </p>
-        <div id="control-editor" class="control-editor"></div>
-        <div class="tip-card">
-          <span class="tip-number">TIP</span>
-          <p id="stage-tip">交差点の中央へ同時に入る車がないか確認しよう。</p>
-        </div>
-      </aside>
     </main>
 
     <footer>
-      <p>Junction Flow <span>×</span> AI Agent Coding Experiment</p>
+      <p>Junction Flow × Grid Flow Control</p>
     </footer>
 
     <script type="module" src="./src/app.js"></script>

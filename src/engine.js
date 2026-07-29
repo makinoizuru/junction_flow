@@ -1,166 +1,204 @@
+const DIRECTIONS = ["north", "east", "south", "west"];
+const DELTAS = {
+  north: [-1, 0],
+  east: [0, 1],
+  south: [1, 0],
+  west: [0, -1],
+};
+
+function cellKey([row, column]) {
+  return `${row},${column}`;
+}
+
 function copyControls(controls = {}) {
   return {
-    arrows: { ...(controls.arrows ?? {}) },
-    signals: { ...(controls.signals ?? {}) },
-    phaseOrder: [...(controls.phaseOrder ?? [])],
+    routes: Object.fromEntries(
+      Object.entries(controls.routes ?? {}).map(([key, routes]) => [
+        key,
+        { ...routes },
+      ]),
+    ),
+    signalCycles: Object.fromEntries(
+      Object.entries(controls.signalCycles ?? {}).map(([key, cycle]) => [
+        key,
+        [...cycle],
+      ]),
+    ),
   };
 }
 
-function rayToBoundary([x, y], [dx, dy], { min, max }) {
-  const candidates = [];
-  if (dx < 0) candidates.push((min - x) / dx);
-  if (dx > 0) candidates.push((max - x) / dx);
-  if (dy < 0) candidates.push((min - y) / dy);
-  if (dy > 0) candidates.push((max - y) / dy);
-  const distance = Math.min(...candidates.filter((value) => value >= 0));
-
-  return Number.isFinite(distance)
-    ? [x + dx * distance, y + dy * distance]
-    : [x, y];
+function mergeControls(defaults, overrides = {}) {
+  const merged = copyControls(defaults);
+  for (const [key, routes] of Object.entries(overrides.routes ?? {})) {
+    merged.routes[key] = { ...(merged.routes[key] ?? {}), ...routes };
+  }
+  for (const [key, cycle] of Object.entries(overrides.signalCycles ?? {})) {
+    merged.signalCycles[key] = [...cycle];
+  }
+  return merged;
 }
 
-export function extendPathToBounds(
-  path,
-  bounds = { min: 6.5, max: 93.5 },
-) {
-  if (path.length < 2) return path.map((point) => [...point]);
-
-  const start = path[0];
-  const next = path[1];
-  const end = path.at(-1);
-  const previous = path.at(-2);
-  const entry = rayToBoundary(
-    start,
-    [start[0] - next[0], start[1] - next[1]],
-    bounds,
+function isInside(stage, [row, column]) {
+  return (
+    row >= 0 &&
+    column >= 0 &&
+    row < stage.size &&
+    column < stage.size
   );
-  const exit = rayToBoundary(
-    end,
-    [end[0] - previous[0], end[1] - previous[1]],
-    bounds,
-  );
+}
 
-  return [entry, ...path.map((point) => [...point]), exit];
+function isRoad(stage, cell) {
+  return isInside(stage, cell) && stage.grid[cell[0]][cell[1]] !== ".";
+}
+
+function axisFor(direction) {
+  return direction === "north" || direction === "south"
+    ? "vertical"
+    : "horizontal";
+}
+
+function exitAt(stage, cell) {
+  return stage.exits.find((exit) =>
+    exit.cell[0] === cell[0] && exit.cell[1] === cell[1]
+  );
+}
+
+export function turnDirection(direction, turn = "straight") {
+  const index = DIRECTIONS.indexOf(direction);
+  if (index < 0) throw new Error(`Unknown direction: ${direction}`);
+  const offset = turn === "right" ? 1 : turn === "left" ? -1 : 0;
+  return DIRECTIONS[(index + offset + DIRECTIONS.length) % DIRECTIONS.length];
 }
 
 export function createDefaultControls(stage) {
-  const phases = stage.controls?.phaseOrder ?? [];
-  return {
-    arrows: Object.fromEntries(
-      Object.entries(stage.controls?.arrows ?? {}).map(([id, options]) => [
-        id,
-        options[0],
-      ]),
-    ),
-    signals: { ...(stage.controls?.signals ?? {}) },
-    phaseOrder: phases.map(() => phases[0]),
-  };
-}
-
-export function resolveVehiclePath(vehicle, controls = {}) {
-  if (!vehicle.branches || !vehicle.branchId) {
-    return vehicle.path.map((point) => [...point]);
-  }
-
-  const selected =
-    controls.arrows?.[vehicle.branchId] ?? vehicle.defaultBranch;
-  return (vehicle.branches[selected] ?? vehicle.path).map((point) => [
-    ...point,
-  ]);
+  return copyControls(stage.controls);
 }
 
 export function createSimulation(stage, controls = {}) {
-  const safeControls = copyControls(controls);
   return {
     stage,
-    controls: safeControls,
+    controls: mergeControls(stage.controls, controls),
     turn: 0,
     status: "ready",
+    reason: null,
     vehicles: stage.vehicles.map((vehicle) => ({
       ...vehicle,
-      path: resolveVehiclePath(vehicle, safeControls),
-      pathIndex: 0,
+      cell: [...vehicle.start],
+      direction: vehicle.direction,
       exited: false,
     })),
   };
 }
 
-export function isSignalGreen(signal, state) {
-  if (signal.phase) {
-    const order = state.controls.phaseOrder;
-    if (!order.length) return false;
-    const duration = state.stage.phaseDuration ?? 2;
-    return order[Math.floor(state.turn / duration) % order.length] === signal.phase;
+function proposalFor(vehicle, state) {
+  if (vehicle.exited) return { type: "stay", vehicle };
+
+  const currentKey = cellKey(vehicle.cell);
+  const currentTile = state.stage.grid[vehicle.cell[0]][vehicle.cell[1]];
+  const instruction =
+    currentTile === "+" || currentTile === "S"
+      ? state.controls.routes[currentKey]?.[vehicle.color] ?? "straight"
+      : "straight";
+  const direction = turnDirection(vehicle.direction, instruction);
+  const delta = DELTAS[direction];
+  const destination = [
+    vehicle.cell[0] + delta[0],
+    vehicle.cell[1] + delta[1],
+  ];
+
+  if (!isRoad(state.stage, destination)) {
+    return { type: "fail", vehicle, direction, reason: "derailed" };
   }
 
-  return state.controls.signals?.[signal.id] ?? true;
+  const destinationKey = cellKey(destination);
+  const destinationTile =
+    state.stage.grid[destination[0]][destination[1]];
+  if (destinationTile === "S") {
+    const cycle = state.controls.signalCycles[destinationKey] ?? [];
+    const phase = cycle[state.turn % cycle.length];
+    if (!phase || phase !== axisFor(direction)) {
+      return { type: "stay", vehicle };
+    }
+  }
+
+  const destinationExit = exitAt(state.stage, destination);
+  if (
+    destinationExit &&
+    (destinationExit.id !== vehicle.exitId ||
+      destinationExit.color !== vehicle.color)
+  ) {
+    return {
+      type: "fail",
+      vehicle,
+      direction,
+      destination,
+      reason: "wrong-exit",
+    };
+  }
+
+  return {
+    type: "move",
+    vehicle,
+    direction,
+    destination,
+    exits: Boolean(destinationExit),
+  };
 }
 
-function isStoppedBySignal(vehicle, nextIndex, state) {
-  return state.stage.signals.some(
-    (signal) =>
-      signal.vehicleIds.includes(vehicle.id) &&
-      vehicle.pathIndex < signal.stopIndex &&
-      nextIndex >= signal.stopIndex &&
-      !isSignalGreen(signal, state),
+function proposalsCrash(proposals, vehicles) {
+  const moving = proposals
+    .map((proposal, index) => ({ ...proposal, index }))
+    .filter((proposal) => proposal.type === "move");
+  const destinations = new Map();
+
+  for (const proposal of moving) {
+    const key = cellKey(proposal.destination);
+    destinations.set(key, (destinations.get(key) ?? 0) + 1);
+  }
+  if ([...destinations.values()].some((count) => count > 1)) return true;
+
+  return moving.some((proposal) =>
+    moving.some((other) =>
+      proposal.index !== other.index &&
+      cellKey(proposal.destination) === cellKey(vehicles[other.index].cell) &&
+      cellKey(other.destination) === cellKey(vehicles[proposal.index].cell)
+    )
   );
-}
-
-function pointKey(point) {
-  return point.join(",");
 }
 
 export function stepSimulation(state) {
-  if (state.status === "crashed" || state.status === "cleared" || state.status === "jammed") {
-    return state;
-  }
+  if (!["ready", "running"].includes(state.status)) return state;
 
-  const occupiedPoints = new Set(
+  const rawProposals = state.vehicles.map((vehicle) =>
+    proposalFor(vehicle, state)
+  );
+  const crashed = proposalsCrash(rawProposals, state.vehicles);
+  const failedProposal = rawProposals.find(({ type }) => type === "fail");
+  const occupied = new Set(
     state.vehicles
       .filter((vehicle) => !vehicle.exited)
-      .map((vehicle) => pointKey(getVehiclePoint(vehicle))),
+      .map((vehicle) => cellKey(vehicle.cell)),
+  );
+  const proposals = rawProposals.map((proposal) =>
+    proposal.type === "move" &&
+    occupied.has(cellKey(proposal.destination))
+      ? { type: "stay", vehicle: proposal.vehicle }
+      : proposal
   );
 
-  const proposals = state.vehicles.map((vehicle) => {
-    if (vehicle.exited) return { type: "stay", vehicle };
-
-    const nextIndex = vehicle.pathIndex + 1;
-    if (nextIndex >= vehicle.path.length) {
-      return { type: "exit", vehicle };
-    }
-    if (isStoppedBySignal(vehicle, nextIndex, state)) {
-      return { type: "stay", vehicle };
-    }
-    if (occupiedPoints.has(pointKey(vehicle.path[nextIndex]))) {
-      return { type: "stay", vehicle };
-    }
-
-    return {
-      type: "move",
-      vehicle,
-      nextIndex,
-      destination: vehicle.path[nextIndex],
-    };
-  });
-
-  const destinationCounts = new Map();
-  for (const proposal of proposals) {
-    if (proposal.type !== "move") continue;
-    const key = pointKey(proposal.destination);
-    destinationCounts.set(key, (destinationCounts.get(key) ?? 0) + 1);
-  }
-
-  const crashed = [...destinationCounts.values()].some((count) => count > 1);
   const vehicles = state.vehicles.map((vehicle, index) => {
     const proposal = proposals[index];
-    if (proposal.type === "exit") return { ...vehicle, exited: true };
-    if (proposal.type === "move") {
-      return { ...vehicle, pathIndex: proposal.nextIndex };
-    }
-    return { ...vehicle };
+    if (proposal.type !== "move") return { ...vehicle };
+    return {
+      ...vehicle,
+      cell: [...proposal.destination],
+      direction: proposal.direction,
+      exited: proposal.exits,
+    };
   });
   const turn = state.turn + 1;
-  const allExited = vehicles.every((vehicle) => vehicle.exited);
+  const cleared = vehicles.every((vehicle) => vehicle.exited);
+  const timeOver = turn >= state.stage.maxTurns;
 
   return {
     ...state,
@@ -168,14 +206,21 @@ export function stepSimulation(state) {
     vehicles,
     status: crashed
       ? "crashed"
-      : allExited
-        ? "cleared"
-        : turn >= state.stage.maxTurns
-          ? "jammed"
-          : "running",
+      : failedProposal
+        ? "failed"
+        : cleared
+          ? "cleared"
+          : timeOver
+            ? "failed"
+            : "running",
+    reason: crashed
+      ? "collision"
+      : failedProposal?.reason ??
+        (timeOver ? "time-over" : null),
   };
 }
 
-export function getVehiclePoint(vehicle) {
-  return vehicle.path[Math.min(vehicle.pathIndex, vehicle.path.length - 1)];
+export function signalPhaseAt(state, key) {
+  const cycle = state.controls.signalCycles[key] ?? [];
+  return cycle.length ? cycle[state.turn % cycle.length] : null;
 }

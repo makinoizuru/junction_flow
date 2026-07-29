@@ -3,101 +3,154 @@ import assert from "node:assert/strict";
 import {
   createDefaultControls,
   createSimulation,
-  extendPathToBounds,
   stepSimulation,
+  turnDirection,
 } from "../src/engine.js";
 
-test("route endpoints extend to fixed map boundaries", () => {
-  assert.deepEqual(
-    extendPathToBounds(
-      [[20, 50], [40, 50], [70, 50]],
-      { min: 6.5, max: 93.5 },
-    ),
-    [[6.5, 50], [20, 50], [40, 50], [70, 50], [93.5, 50]],
-  );
-});
-
-test("default phase controls begin with one direction repeated", () => {
-  const stage = {
+function stage(overrides = {}) {
+  return {
+    size: 5,
+    grid: [
+      "..#..",
+      "..#..",
+      "##+##",
+      "..#..",
+      "..#..",
+    ],
+    vehicles: [
+      {
+        id: "red-car",
+        color: "red",
+        start: [2, 0],
+        direction: "east",
+        exitId: "red-exit",
+      },
+    ],
+    exits: [{ id: "red-exit", color: "red", cell: [2, 4] }],
     controls: {
-      arrows: { route: ["straight", "turn"] },
-      phaseOrder: ["north-south", "east-west"],
+      routes: { "2,2": { red: "straight" } },
+      signalCycles: {},
     },
+    maxTurns: 12,
+    ...overrides,
   };
+}
 
-  assert.deepEqual(createDefaultControls(stage), {
-    arrows: { route: "straight" },
-    signals: {},
-    phaseOrder: ["north-south", "north-south"],
+function runToEnd(current) {
+  while (current.status === "ready" || current.status === "running") {
+    current = stepSimulation(current);
+  }
+  return current;
+}
+
+test("relative turns rotate only to orthogonal directions", () => {
+  assert.equal(turnDirection("north", "right"), "east");
+  assert.equal(turnDirection("north", "left"), "west");
+  assert.equal(turnDirection("west", "straight"), "west");
+});
+
+test("default controls are copied from the stage", () => {
+  const currentStage = stage({
+    controls: {
+      routes: { "2,2": { red: "left", blue: "right" } },
+      signalCycles: {
+        "2,2": ["vertical", "horizontal", "horizontal", "vertical"],
+      },
+    },
   });
+
+  const controls = createDefaultControls(currentStage);
+  assert.deepEqual(controls, currentStage.controls);
+  controls.routes["2,2"].red = "right";
+  assert.equal(currentStage.controls.routes["2,2"].red, "left");
 });
 
-test("a vehicle advances one path point per turn", () => {
-  const stage = {
-    maxTurns: 20,
-    signals: [],
-    vehicles: [{ id: "a", path: [[0, 0], [1, 0], [2, 0]] }],
-  };
-
-  const next = stepSimulation(createSimulation(stage, {}));
-
-  assert.equal(next.vehicles[0].pathIndex, 1);
+test("a vehicle advances one grid cell per turn", () => {
+  const next = stepSimulation(createSimulation(stage(), {}));
+  assert.deepEqual(next.vehicles[0].cell, [2, 1]);
 });
 
-test("a red signal stops a vehicle before its stop index", () => {
-  const stage = {
-    maxTurns: 20,
-    signals: [{ id: "s", vehicleIds: ["a"], stopIndex: 1 }],
-    vehicles: [{ id: "a", path: [[0, 0], [1, 0], [2, 0]] }],
-  };
+test("a color-specific intersection instruction turns the vehicle", () => {
+  let current = createSimulation(stage(), {
+    routes: { "2,2": { red: "left" } },
+  });
+  current = stepSimulation(stepSimulation(current));
+  current = stepSimulation(current);
 
-  const next = stepSimulation(
-    createSimulation(stage, { signals: { s: false } }),
-  );
-
-  assert.equal(next.vehicles[0].pathIndex, 0);
+  assert.equal(current.vehicles[0].direction, "north");
+  assert.deepEqual(current.vehicles[0].cell, [1, 2]);
 });
 
-test("a vehicle waits when its next point is occupied", () => {
-  const stage = {
-    maxTurns: 20,
-    signals: [],
-    vehicles: [
-      { id: "front", path: [[1, 0], [2, 0], [3, 0]] },
-      { id: "back", path: [[0, 0], [1, 0], [2, 0]] },
+test("a signal cycle blocks the wrong axis and repeats", () => {
+  const signalStage = stage({
+    grid: [
+      "..#..",
+      "..#..",
+      "##S##",
+      "..#..",
+      "..#..",
     ],
-  };
-
-  const next = stepSimulation(createSimulation(stage, {}));
-
-  assert.equal(next.vehicles[1].pathIndex, 0);
+    controls: {
+      routes: { "2,2": { red: "straight" } },
+      signalCycles: {
+        "2,2": ["horizontal", "vertical", "horizontal", "vertical"],
+      },
+    },
+  });
+  let current = createSimulation(signalStage, {});
+  current = stepSimulation(current);
+  current = stepSimulation(current);
+  assert.deepEqual(current.vehicles[0].cell, [2, 1]);
+  current = stepSimulation(current);
+  assert.deepEqual(current.vehicles[0].cell, [2, 2]);
 });
 
-test("two vehicles entering the same point collide", () => {
-  const stage = {
-    maxTurns: 20,
-    signals: [],
+test("two vehicles entering the same cell collide", () => {
+  const collisionStage = stage({
     vehicles: [
-      { id: "a", path: [[0, 1], [1, 1]] },
-      { id: "b", path: [[1, 0], [1, 1]] },
+      { id: "red-car", color: "red", start: [2, 1], direction: "east", exitId: "red-exit" },
+      { id: "blue-car", color: "blue", start: [1, 2], direction: "south", exitId: "blue-exit" },
     ],
-  };
+    exits: [
+      { id: "red-exit", color: "red", cell: [2, 4] },
+      { id: "blue-exit", color: "blue", cell: [4, 2] },
+    ],
+  });
 
-  const next = stepSimulation(createSimulation(stage, {}));
-
+  const next = stepSimulation(createSimulation(collisionStage, {}));
   assert.equal(next.status, "crashed");
 });
 
-test("all exited vehicles clear the stage", () => {
-  const stage = {
-    maxTurns: 20,
-    signals: [],
-    vehicles: [{ id: "a", path: [[0, 0], [1, 0]] }],
-  };
+test("entering another color's exit fails the stage", () => {
+  const wrongExitStage = stage({
+    exits: [{ id: "blue-exit", color: "blue", cell: [2, 2] }],
+  });
+  const failed = runToEnd(createSimulation(wrongExitStage, {}));
+  assert.equal(failed.status, "failed");
+  assert.equal(failed.reason, "wrong-exit");
+});
 
-  const next = stepSimulation(
-    stepSimulation(createSimulation(stage, {})),
+test("leaving the road or reaching a dead end fails the stage", () => {
+  const failed = runToEnd(
+    createSimulation(
+      stage({
+        grid: [
+          ".....",
+          ".....",
+          "##+..",
+          ".....",
+          ".....",
+        ],
+        exits: [],
+      }),
+      {},
+    ),
   );
+  assert.equal(failed.status, "failed");
+  assert.equal(failed.reason, "derailed");
+});
 
-  assert.equal(next.status, "cleared");
+test("reaching the matching colored exit clears the stage", () => {
+  const cleared = runToEnd(createSimulation(stage(), {}));
+  assert.equal(cleared.status, "cleared");
 });

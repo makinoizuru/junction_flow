@@ -1,77 +1,91 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { STAGES } from "../src/stages.js";
-import { createSimulation, stepSimulation } from "../src/engine.js";
+import {
+  createDefaultControls,
+  createSimulation,
+  stepSimulation,
+} from "../src/engine.js";
 
-test("the game defines four distinct stages", () => {
+function run(stage, controls) {
+  let state = createSimulation(stage, controls);
+  while (state.status === "ready" || state.status === "running") {
+    state = stepSimulation(state);
+  }
+  return state;
+}
+
+test("the game defines four distinct 7x7 grid stages", () => {
   assert.equal(STAGES.length, 4);
-  assert.equal(new Set(STAGES.map((stage) => stage.id)).size, 4);
-});
-
-test("each stage has Japanese UI metadata and puzzle fields", () => {
+  assert.equal(new Set(STAGES.map(({ id }) => id)).size, 4);
   for (const stage of STAGES) {
-    assert.match(stage.title, /^[^\x00-\x7F]+$/);
-    assert.equal(typeof stage.instruction, "string");
-    assert.ok(stage.instruction.length > 0);
-    assert.equal(typeof stage.tip, "string");
-    assert.ok(stage.tip.length > 0);
-    for (const key of ["controls", "vehicles", "signals", "maxTurns", "solution"]) {
-      assert.ok(stage[key] !== undefined, `${stage.id} missing ${key}`);
-    }
+    assert.equal(stage.size, 7);
+    assert.equal(stage.grid.length, 7);
+    assert.ok(stage.grid.every((row) => row.length === 7));
+    assert.ok(stage.grid.every((row) => /^[.#+S]+$/.test(row)));
   }
 });
 
-test("every listed phase controls at least one signal", () => {
+test("each stage has Japanese metadata and boundary portals", () => {
   for (const stage of STAGES) {
-    for (const phase of stage.controls?.phaseOrder ?? []) {
-      assert.ok(stage.signals.some((signal) => signal.phase === phase), `${stage.id} phase ${phase} is unused`);
-    }
-  }
-});
-
-test("every vehicle has fixed entry and exit portals on the map edge", () => {
-  const onEdge = ([x, y]) =>
-    [x, y].some((value) => value === 6.5 || value === 93.5);
-
-  for (const stage of STAGES) {
+    assert.match(stage.title, /[^\x00-\x7F]/);
+    assert.match(stage.instruction, /[^\x00-\x7F]/);
+    assert.match(stage.tip, /[^\x00-\x7F]/);
     for (const vehicle of stage.vehicles) {
-      assert.ok(onEdge(vehicle.portals.entry));
-      assert.ok(onEdge(vehicle.portals.exit));
+      const [row, column] = vehicle.start;
+      assert.ok(row === 0 || column === 0 || row === 6 || column === 6);
+      assert.notEqual(stage.grid[row][column], ".");
+    }
+    for (const exit of stage.exits) {
+      const [row, column] = exit.cell;
+      assert.ok(row === 0 || column === 0 || row === 6 || column === 6);
+      assert.notEqual(stage.grid[row][column], ".");
     }
   }
 });
 
-test("mixed-turns wrong arrow cannot clear", () => {
-  const stage = STAGES.find((item) => item.id === "mixed-turns");
-  let state = createSimulation(stage, { ...stage.solution, arrows: { turner: "right" } });
-  while (state.status === "ready" || state.status === "running") state = stepSimulation(state);
-  assert.notEqual(state.status, "cleared");
+test("every intersection has a route setting for every vehicle color", () => {
+  for (const stage of STAGES) {
+    const colors = [...new Set(stage.vehicles.map(({ color }) => color))];
+    stage.grid.forEach((row, rowIndex) => {
+      [...row].forEach((tile, columnIndex) => {
+        if (tile !== "+" && tile !== "S") return;
+        const settings = stage.controls.routes[`${rowIndex},${columnIndex}`];
+        for (const color of colors) {
+          assert.ok(settings?.[color], `${stage.id} missing ${color} route`);
+        }
+      });
+    });
+  }
 });
 
-test("rush-hour vehicles share a central crossing and require phase order", () => {
-  const stage = STAGES.find((item) => item.id === "rush-hour");
-  const paths = stage.vehicles.map((vehicle) => vehicle.path);
-  const common = paths[0].filter((point) => paths.every((path) => path.some((p) => p[0] === point[0] && p[1] === point[1])));
-  assert.ok(common.length > 0);
-  let state = createSimulation(stage, { phaseOrder: ["phase-1", "phase-1", "phase-1"] });
-  while (state.status === "ready" || state.status === "running") state = stepSimulation(state);
-  assert.notEqual(state.status, "cleared");
-});
-
-test("crossing requires the listed north-south-first order", () => {
-  const stage = STAGES.find((item) => item.id === "crossing");
-  let state = createSimulation(stage, stage.solution);
-  while (state.status === "ready" || state.status === "running") state = stepSimulation(state);
-  assert.equal(state.status, "cleared");
-  state = createSimulation(stage, { phaseOrder: ["east-west", "north-south"] });
-  while (state.status === "ready" || state.status === "running") state = stepSimulation(state);
-  assert.notEqual(state.status, "cleared");
+test("every signal owns a four-turn vertical/horizontal cycle", () => {
+  for (const stage of STAGES) {
+    stage.grid.forEach((row, rowIndex) => {
+      [...row].forEach((tile, columnIndex) => {
+        if (tile !== "S") return;
+        const cycle =
+          stage.controls.signalCycles[`${rowIndex},${columnIndex}`];
+        assert.equal(cycle.length, 4);
+        assert.ok(
+          cycle.every((phase) =>
+            phase === "vertical" || phase === "horizontal"
+          ),
+        );
+      });
+    });
+  }
 });
 
 for (const stage of STAGES) {
   test(`${stage.id} has a verified solution`, () => {
-    let state = createSimulation(stage, stage.solution);
-    while (state.status === "ready" || state.status === "running") state = stepSimulation(state);
-    assert.equal(state.status, "cleared");
+    assert.equal(run(stage, stage.solution).status, "cleared");
+  });
+
+  test(`${stage.id} does not clear with its initial controls`, () => {
+    assert.notEqual(
+      run(stage, createDefaultControls(stage)).status,
+      "cleared",
+    );
   });
 }
