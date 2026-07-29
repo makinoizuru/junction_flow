@@ -3,8 +3,8 @@ import {
   createSimulation,
   signalPhaseAt,
   stepSimulation,
-} from "./engine.js";
-import { STAGES } from "./stages.js";
+} from "./engine.js?v=20260729-2";
+import { STAGES } from "./stages.js?v=20260729-2";
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 const CELL = 100;
